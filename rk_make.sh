@@ -8,7 +8,7 @@ arm_version=$(arm-linux-gcc --version 2>/dev/null)
 if [ ! "$aarch64_version" = "" ] ;then
 gcc=aarch64-linux-gcc
 echo "gcc is aarch64-linux-gcc"
-elif [ "$arm_version" = "" ] ;then
+elif [ ! "$arm_version" = "" ] ;then
 gcc=arm-linux-gcc
 echo "gcc is arm-linux-gcc"
 fi
