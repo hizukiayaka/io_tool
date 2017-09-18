@@ -13,14 +13,10 @@
 #include <sys/mman.h>
 #include <sys/types.h>
 #include <stdint.h>
+#include <stdbool.h>
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <errno.h>
-
-#ifndef FALSE
-#define FALSE	0
-#define TRUE	(!FALSE)
-#endif
 
 #ifdef MMAP64
 #define mmap mmap64
@@ -53,6 +49,113 @@ usage (void)
 "Note access size (-1|2|4) does not apply to file based accesses.\n\n",
 		argv0, argv0, argv0, argv0, argv0, argv0);
 	exit(1);
+}
+
+static void
+memread_memory(unsigned long phys_addr, uint8_t *addr, int len, int iosize);
+
+static int
+mem_read(unsigned long req_addr, void *val, int req_len, bool memread)
+{
+	int mfd;
+	unsigned long real_len, real_addr, offset;
+	void *real_io = NULL;
+
+	if (!req_addr || !val || !req_len)
+		return -EINVAL;
+
+	real_addr = req_addr & ~(sysconf(_SC_PAGE_SIZE) - 1);
+
+	offset = req_addr - real_addr;
+	real_len = req_len + offset;
+
+	if (real_addr + real_len < real_addr) {
+		fprintf(stderr, "Aligned addr+len exceeds top of address space\n");
+		return -1;
+	}
+
+	mfd = open("/dev/mem", (memread ? O_RDONLY : O_RDWR) | O_SYNC);
+	if (mfd < 0) {
+		perror("open /dev/mem");
+		return -1;
+	}
+
+	real_io = mmap(NULL, real_len,
+			memread ? PROT_READ:PROT_WRITE,
+			MAP_SHARED, mfd, real_addr);
+	if (real_io == MAP_FAILED) {
+		fprintf(stderr, "mmap() failed: %s\n", strerror(errno));
+		return -1;
+	}
+
+	memcpy(val, real_io + offset, req_len);
+
+	munmap(real_io, real_len);
+	return close(mfd);
+}
+
+static int
+iommu32_memread(unsigned long iommu_base, unsigned long virt_addr, int len,
+	      int iosize)
+{
+	int mfd;
+	unsigned long dte_addr, pte_addr, page_addr, addr;
+	unsigned long offset;
+	void *io = NULL;
+
+	if (mem_read(iommu_base, &dte_addr, 4, true))
+		return -1;
+
+	if ((dte_addr & 0xFFFFFFFF) == 0xFFFFFFFF) {
+		printf("iommu is clear\n");
+		return 0;
+	}
+
+	offset = virt_addr & (0x3FF << 22);
+	offset = offset >> 20;
+	dte_addr += offset;
+	if (mem_read(dte_addr, &pte_addr, 4, true))
+		return -1;
+	/*
+	 * Page directory entry detail 
+	 * [31:12] Page table address [0] Page table present
+	 */
+	pte_addr &= (0xFFFFF << 12);
+	offset = virt_addr & (0x3FF << 12);
+	offset = offset >> 10;
+	pte_addr += offset;
+
+	if (mem_read(pte_addr, &page_addr, 4, true))
+		return -1;
+	page_addr &= (0xFFFCF << 12);
+	offset = virt_addr & 0xFFF;
+	addr = page_addr + offset;
+
+	printf("device address: %08lx => %08lx\n"
+	       "iommu base: %08lx, dte: %08lx, pte: %08lx, page: %08lx\n",
+	       virt_addr, addr, iommu_base, dte_addr, pte_addr, page_addr);
+
+	if (!page_addr)
+		return -1;
+
+	mfd = open("/dev/mem", O_RDONLY | O_SYNC);
+	if (mfd < 0) {
+		perror("open /dev/mem");
+		return -1;
+	}
+
+	io = mmap(NULL, len,
+			PROT_READ,
+			MAP_SHARED, mfd, addr);
+	if (io == MAP_FAILED) {
+		fprintf(stderr, "mmap() failed: %s\n", strerror(errno));
+		return -1;
+	}
+
+	memread_memory(addr, io, len, iosize);
+
+	munmap(io, len);
+	return close(mfd);
 }
 
 
@@ -121,8 +224,9 @@ main (int argc, char **argv)
 	int mfd, ffd = 0, req_len = 0, opt;
 	uint8_t *real_io;
 	unsigned long real_len, real_addr, req_addr, req_value = 0, offset;
+	unsigned long iommu_base = 0;
 	char *endptr;
-	int memread = TRUE;
+	bool memread = true, iommu_read = false;
 	int iosize = 1;
 	char *filename = NULL;
 	int verbose = 0;
@@ -132,7 +236,7 @@ main (int argc, char **argv)
 	if (argc == 1)
 		usage();
 
-	while ((opt = getopt(argc, argv, "hv124rwl:f:")) > 0) {
+	while ((opt = getopt(argc, argv, "hv124rwl:f:i:")) > 0) {
 		switch (opt) {
 		case 'h':
 			usage();
@@ -145,10 +249,10 @@ main (int argc, char **argv)
 			iosize = opt - '0';
 			break;
 		case 'r':
-			memread = TRUE;
+			memread = true;
 			break;
 		case 'w':
-			memread = FALSE;
+			memread = false;
 			break;
 		case 'l':
 			req_len = strtoul(optarg, &endptr, 0);
@@ -159,6 +263,15 @@ main (int argc, char **argv)
 			break;
 		case 'f':
 			filename = strdup(optarg);
+			break;
+		case 'i':
+			iommu_read = true;
+			iommu_base = strtoul(optarg, &endptr, 0);
+			if (*endptr) {
+				fprintf(stderr, "Bad iommu base: '%s'\n",
+					optarg);
+				exit(1);
+			}
 			break;
 		default:
 			fprintf(stderr, "Unknown option: %c\n", opt);
@@ -176,8 +289,13 @@ main (int argc, char **argv)
 		exit(1);
 	}
 	optind++;
+
+	if (memread && iommu_read) {
+		return iommu32_memread (iommu_base, req_addr, req_len, iosize);
+	}
+
 	if (!filename && optind < argc)
-		memread = FALSE;
+		memread = false;
 	if (filename && optind > argc) {
 		fprintf(stderr, "Filename AND value given\n");
 		exit(1);
@@ -268,14 +386,13 @@ main (int argc, char **argv)
 			"\tusing %d byte accesses of value 0x%0*lx\n",
 			req_len, req_addr, iosize, iosize*2, req_value);
 
-	real_addr = req_addr & ~4095;
+	real_addr = req_addr & ~(sysconf(_SC_PAGE_SIZE) - 1);
 	if (real_addr == 0xfffff000) {
 		fprintf(stderr, "Sorry, cannot map the top 4K page\n");
 		exit(1);
 	}
 	offset = req_addr - real_addr;
 	real_len = req_len + offset;
-	real_len = (real_len + 4095) & ~ 4095;
 	if (real_addr + real_len < real_addr) {
 		fprintf(stderr, "Aligned addr+len exceeds top of address space\n");
 		exit(1);
