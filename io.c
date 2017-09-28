@@ -18,9 +18,7 @@
 #include <fcntl.h>
 #include <errno.h>
 
-#ifdef MMAP64
-#define mmap mmap64
-#endif
+#include <config.h>
 
 static char *argv0;
 

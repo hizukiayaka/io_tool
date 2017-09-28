@@ -24,6 +24,7 @@ AC_TYPE_UINT8_T
 
 # Checks for library functions.
 AC_FUNC_MMAP
+AC_SYS_LARGEFILE
 AC_CHECK_FUNCS([munmap strdup strerror strtoul])
 
 AC_CONFIG_FILES([Makefile])
