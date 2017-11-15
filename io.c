@@ -78,9 +78,8 @@ mem_read(unsigned long req_addr, void *val, int req_len, bool memread)
 		return -1;
 	}
 
-	real_io = mmap(NULL, real_len,
-			memread ? PROT_READ:PROT_WRITE,
-			MAP_SHARED, mfd, real_addr);
+	real_io = mmap(NULL, real_len, memread ? PROT_READ:PROT_WRITE,
+		       MAP_SHARED, mfd, real_addr);
 	if (real_io == MAP_FAILED) {
 		fprintf(stderr, "mmap() failed: %s\n", strerror(errno));
 		return -1;
@@ -96,9 +95,12 @@ static int
 iommu32_memread(unsigned long iommu_base, unsigned long virt_addr, int len,
 	      int iosize)
 {
-	int mfd;
-	unsigned long dte_addr, pte_addr, page_addr, addr;
-	unsigned long offset;
+	int mfd = 0;
+	unsigned long dte_addr = 0;
+	unsigned long pte_addr = 0;
+	unsigned long page_addr = 0;
+	unsigned long addr = 0;
+	unsigned long offset = 0;
 	void *io = NULL;
 
 	if (mem_read(iommu_base, &dte_addr, 4, true))
@@ -142,9 +144,7 @@ iommu32_memread(unsigned long iommu_base, unsigned long virt_addr, int len,
 		return -1;
 	}
 
-	io = mmap(NULL, len,
-			PROT_READ,
-			MAP_SHARED, mfd, addr);
+	io = mmap(NULL, len, PROT_READ, MAP_SHARED, mfd, addr);
 	if (io == MAP_FAILED) {
 		fprintf(stderr, "mmap() failed: %s\n", strerror(errno));
 		return -1;
@@ -409,7 +409,7 @@ main (int argc, char **argv)
 	real_io = mmap(NULL, real_len,
 			memread ? PROT_READ:PROT_WRITE,
 			MAP_SHARED, mfd, real_addr);
-	if (real_io == (void *)(-1)) {
+	if (real_io == MAP_FAILED) {
 		fprintf(stderr, "mmap() failed: %s\n", strerror(errno));
 		exit(1);
 	}
